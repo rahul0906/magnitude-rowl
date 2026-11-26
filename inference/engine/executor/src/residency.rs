@@ -370,8 +370,7 @@ impl Stored {
     /// The stored tensor `weight` imports: the artifact's tensor `weight`
     /// names ([`Self::from_gguf`]), of which, where `leading`, a plan of an
     /// expert stack's first experts (`WeightPlan::leading`), only those first
-    /// rows. A dense weight's plan may differ from its stored rows by its
-    /// transforms, which no prefix of the stored bytes stands for.
+    /// rows. The stack's import transforms still apply to each stored expert.
     pub fn of_plan(
         artifact: &GgufArtifact,
         weight: &crate::WeightPlan,
@@ -381,19 +380,26 @@ impl Stored {
         if !leading {
             return Ok(stored);
         }
-        let (Some(&rows), Some(&stored_rows)) = (weight.shape.first(), stored.shape().first()) else {
+        stored.leading_for_plan(weight)
+    }
+
+    /// A plan's leading experts, validating the logical shape after its
+    /// transforms (for example, one row slice of a fused gate/up stack).
+    fn leading_for_plan(&self, weight: &crate::WeightPlan) -> Result<Self, WeightImportError> {
+        let (Some(&rows), Some(&stored_rows)) = (weight.shape.first(), self.shape().first()) else {
             return Err(invalid(format!("{:?} has no leading dimension", weight.descriptor.name)));
         };
         let name = &weight.descriptor.name;
-        let leading = stored
+        let leading = self
             .leading(rows)
             .map_err(|reason| invalid(format!("{rows} leading rows of {name:?} ({stored_rows} stored): {reason}")))?;
-        match leading.shape()[1..] == weight.shape[1..] {
+        let logical = weight.descriptor.transformed_shape(leading.shape()).map_err(|error| invalid(error.to_string()))?;
+        match logical == weight.shape {
             true => Ok(leading),
             false => Err(invalid(format!(
-                "the planned shape {:?} of {name:?} differs from its stored {:?}",
+                "the planned shape {:?} of {name:?} differs from its transformed leading shape {logical:?} (stored {:?})",
                 weight.shape,
-                stored.shape()
+                self.shape()
             ))),
         }
     }
@@ -2245,6 +2251,44 @@ fn validate_dense(stored: &StoredTensor) -> Result<usize, WeightImportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fused_expert_prefix_applies_each_experts_row_slice() {
+        use magnitude_family_contracts::{WeightKind, WeightScope};
+
+        let path = std::env::temp_dir().join(format!("magnitude-fused-experts-{}.bin", std::process::id()));
+        let bytes = (0..32).flat_map(|value| (value as f32).to_le_bytes()).collect::<Vec<_>>();
+        std::fs::write(&path, &bytes).unwrap();
+        let source = Arc::new(FileSource::open(&path).unwrap());
+        let stored = Stored::Dense {
+            tensor: StoredTensor { source, offset: 0, nbytes: bytes.len() as u64, dtype: DType::F32, shape: vec![4, 4, 2] },
+            parts: Vec::new(),
+        };
+        let descriptor = WeightDescriptor::stored("fused", [4, 4, 2]).slice_rows(2, 2).unwrap();
+        let plan = WeightPlan {
+            role: WeightRole { scope: WeightScope::Target, kind: WeightKind::ExpertUp },
+            component: crate::ArtifactComponent {
+                kind: crate::ArtifactComponentKind::Target,
+                identity: magnitude_artifacts::ArtifactIdentity([7; 32]),
+            },
+            source: Element::f32(), upload: Element::f32(), resident: Element::f32(),
+            shape: descriptor.shape.clone(), descriptor, source_bytes: 64, resident_bytes: 64,
+            scale: None, bound: 0, holding: crate::Holding::Whole,
+        };
+        let prefix = plan.leading(2).unwrap();
+        assert_eq!(prefix.descriptor.shape, vec![2, 2, 2]);
+        let selected = stored.leading_for_plan(&prefix).unwrap();
+        assert_eq!(selected.shape(), &[2, 4, 2]);
+        let bytes = crate::programs::native_import::stored_source_bytes(&selected).unwrap();
+        let uploaded = crate::import_transforms::upload_bytes(&prefix, &selected, bytes).unwrap();
+        let expected = [4f32, 5., 6., 7., 12., 13., 14., 15.]
+            .into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>();
+        assert_eq!(uploaded, expected);
+        let mut wrong = prefix;
+        wrong.shape[2] += 1;
+        assert!(stored.leading_for_plan(&wrong).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
 
     /// An expert stack's first experts are a prefix of its bytes and of its
     /// scale grid's: `leading` reads them alone, and refuses what does not

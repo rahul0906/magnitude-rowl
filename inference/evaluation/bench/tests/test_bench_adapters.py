@@ -81,7 +81,7 @@ def test_magnitude_serves_the_catalog_drafter_and_the_run_tuning(
         inference=TREE,
         magnitude=MagnitudeOptions.of(
             TREE,
-            binary=tmp_path / "engine", device="cpu", mtp_proposals=2, tuning_seconds=30,
+            binary=tmp_path / "engine", device="cpu", kv_codec="dense", weight_cap=123456, mtp_proposals=2, tuning_seconds=30,
             fresh_tuning=True, draft_budget='{"generated":2,"verified":1}',
         )
     )
@@ -92,6 +92,8 @@ def test_magnitude_serves_the_catalog_drafter_and_the_run_tuning(
     assert flag(argv, "--method") == "dflash"
     assert flag(argv, "--draft") == str(acquisition.drafter.path)
     assert flag(argv, "--mtp-proposals") == "2" and flag(argv, "--device") == "cpu"
+    assert flag(argv, "--kv-codec") == "dense"
+    assert flag(argv, "--weight-cap") == "123456"
     assert flag(argv, "--draft-budget") == options.magnitude.draft_budget
     assert flag(argv, "--tuning-budget") == "30.0"
     assert flag(argv, "--tuning-trace") == str(tmp_path / "run" / "tuning.jsonl")
@@ -104,6 +106,8 @@ def test_magnitude_serves_the_catalog_drafter_and_the_run_tuning(
     )
     argv = make("magnitude", artifact_path, tmp_path, embedded).argv(1234, 8192, 1, tmp_path)
     assert flag(argv, "--method") == "mtp" and "--draft" not in argv
+    assert "--kv-codec" not in argv  # the default remains the engine's
+    assert "--weight-cap" not in argv
     assert "--tuning-budget" not in argv and "--fresh-tuning" not in argv
 
     # A drafting engine traces its controller's widths into its log; a plain one doesn't.

@@ -43,6 +43,10 @@ class MagnitudeOptions(Record):
     #: measurements) exactly as given; the engine's own default when unset.
     cache_dir: Path | None = None
     prefill_tokens: int | None = Field(default=None, gt=0)
+    #: The engine's KV history policy; unset uses the model's serving default.
+    kv_codec: Literal["dense", "affine-k8v4"] | None = None
+    #: A bound on held weight bytes, not on the process's total memory.
+    weight_cap: int | None = Field(default=None, gt=0)
     #: Proposals per draft for the catalog drafter; the engine's own when unset.
     mtp_proposals: int | None = Field(default=None, gt=0)
     #: Exact engine draft-budget JSON, or ``adaptive``, preserved in run identity.

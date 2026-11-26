@@ -89,6 +89,10 @@ def measurement_options(parser: argparse.ArgumentParser) -> None:
     magnitude.add_argument("--magnitude-cache-dir", type=Path,
                            help="the engine's kernel cache, exactly this directory")
     magnitude.add_argument("--magnitude-prefill-tokens", type=int)
+    magnitude.add_argument("--magnitude-kv-codec", choices=("dense", "affine-k8v4"),
+                           help="the engine's KV history policy; unset uses its serving default")
+    magnitude.add_argument("--magnitude-weight-cap", type=int,
+                           help="held weight cap in bytes, not a total process-memory limit")
     magnitude.add_argument("--magnitude-mtp-proposals", type=int)
     magnitude.add_argument("--magnitude-draft-budget",
                            help="exact draft-budget JSON, or `adaptive`")
@@ -155,6 +159,8 @@ def engine_options(args: argparse.Namespace, inference: Path) -> EngineOptions:
         device=args.magnitude_device,
         cache_dir=args.magnitude_cache_dir,
         prefill_tokens=args.magnitude_prefill_tokens,
+        kv_codec=args.magnitude_kv_codec,
+        weight_cap=args.magnitude_weight_cap,
         mtp_proposals=args.magnitude_mtp_proposals,
         draft_budget=args.magnitude_draft_budget,
         method=args.magnitude_method,

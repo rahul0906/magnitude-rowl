@@ -92,3 +92,24 @@ def test_the_acquisition_object_names_the_first_shard_and_the_set_as_a_model_of_
     assert artifacts["model"] == f"fixture-fp8:checkpoint-{digest[:16]}"
     assert artifacts["target_sha256"] == identity.sha256(artifacts["target"])  # the target file's own, as a catalog's
     assert artifacts["drafter"] is None and artifacts["projector"] is None
+
+
+def test_a_separate_mtp_companion_is_identified_by_its_bytes_without_copying_it(tmp_path):
+    directory = make_set(tmp_path / "set")
+    mtp = tmp_path / "mtp-gemma.gguf"
+    mtp.write_bytes(b"GGUF separate MTP companion")
+    artifacts = checkpoint.acquire(str(directory), str(tmp_path / "artifacts.json"), str(mtp))
+    assert artifacts["drafter"] == {
+        "method": "mtp", "path": str(mtp), "sha256": identity.sha256(mtp),
+    }
+    assert json.loads((tmp_path / "artifacts.json").read_text()) == artifacts
+    assert mtp.read_bytes() == b"GGUF separate MTP companion"
+
+
+def test_a_separate_mtp_companion_with_a_false_provenance_record_is_refused(tmp_path):
+    directory = make_set(tmp_path / "set")
+    mtp = tmp_path / "mtp-gemma.gguf"
+    mtp.write_bytes(b"GGUF separate MTP companion")
+    (tmp_path / "mtp-gemma.json").write_text(json.dumps({"sha256": "0" * 64}))
+    with pytest.raises(checkpoint.Refused, match="provenance record names " + "0" * 64):
+        checkpoint.acquire(str(directory), str(tmp_path / "artifacts.json"), str(mtp))

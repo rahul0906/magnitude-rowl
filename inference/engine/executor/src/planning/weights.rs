@@ -312,8 +312,10 @@ impl WeightPlan {
     /// rows.
     pub fn leading(&self, experts: u64) -> Option<Self> {
         let rows = *self.shape.first()?;
-        (experts <= rows).then_some(())?;
+        (experts <= rows && self.descriptor.shape == self.shape).then_some(())?;
         let part = |bytes: u64| leading_bytes(bytes, rows, experts);
+        let mut descriptor = self.descriptor.clone();
+        descriptor.shape[0] = experts;
         let scale = match &self.scale {
             None => None,
             Some(scale) if scale.stored == 1 => Some(WeightScalePlan {
@@ -332,6 +334,7 @@ impl WeightPlan {
             shape: [&[experts][..], &self.shape[1..]].concat(),
             source_bytes: part(self.source_bytes)?,
             resident_bytes: part(self.resident_bytes)?,
+            descriptor,
             scale,
             ..self.clone()
         })
@@ -2052,6 +2055,9 @@ pub struct ModelLoadPlan {
     pub(super) target: Vec<WeightPlan>,
     pub(super) head: Option<HeadWeightsPlan>,
     pub(super) vision: Option<Vec<WeightPlan>>,
+    /// The physical tensors in each artifact component, before any import
+    /// transforms. Shared by all the load's resident and banked forms.
+    stored_tensors: std::sync::Arc<FxHashMap<ArtifactComponent, FxHashMap<String, u64>>>,
     /// The target's host-resident gathered tables.
     pub(super) host_tables: Vec<HostTablePlan>,
     /// The lossless readout views a scope may be stored as. They are not
@@ -2101,13 +2107,28 @@ fn head_component_scope(scope: WeightScope) -> Result<bool, String> {
     }
 }
 
+#[cfg(test)]
+fn synthetic_stored_tensors(weights: &[WeightPlan]) -> std::sync::Arc<FxHashMap<ArtifactComponent, FxHashMap<String, u64>>> {
+    let mut components = fx_map();
+    for weight in weights {
+        let tensors: &mut FxHashMap<String, u64> = components.entry(weight.component).or_insert_with(fx_map);
+        tensors.insert(
+            weight.descriptor.name.clone(),
+            representation_bytes(weight.source, &weight.descriptor.shape).expect("synthetic stored weight is sized"),
+        );
+    }
+    std::sync::Arc::new(components)
+}
+
 impl ModelLoadPlan {
     #[cfg(test)]
     pub(super) fn for_bank_test(target: Vec<WeightPlan>, bank: super::ExpertBankPlan) -> Self {
+        let stored_tensors = synthetic_stored_tensors(&target);
         let mut plan = Self {
             target,
             head: None,
             vision: None,
+            stored_tensors,
             host_tables: Vec::new(),
             readout_candidates: Vec::new(),
             readout_choices: Vec::new(),
@@ -2222,8 +2243,9 @@ impl ModelLoadPlan {
     /// them as it runs ([`WeightPlacement`]).
     pub fn weight_placement(&self) -> Result<WeightPlacement, String> {
         let overflow = || "weight placement bytes overflow".to_owned();
-        // Each stored tensor once, however many roles or representations
-        // the load gives it (a tied embedding is a table and a head).
+        // Count physical tensors, not the transformed shapes of their roles:
+        // two roles can be disjoint slices of the same fused tensor, or
+        // different representations of the same tensor.
         let capacity = self.target.len()
             + self.head().map_or(0, <[WeightPlan]>::len)
             + self.vision.as_ref().map_or(0, Vec::len)
@@ -2231,23 +2253,24 @@ impl ModelLoadPlan {
         let mut counted = fx_set_with_capacity::<(ArtifactComponent, &str)>(capacity);
         let mut stored = 0u64;
         let weights = [self.target.as_slice(), self.head().unwrap_or_default(), self.vision.as_deref().unwrap_or_default()];
-        for weight in weights.into_iter().flatten() {
-            if counted.insert((weight.component, weight.descriptor.name.as_str())) {
-                let bytes = match weight.holding {
-                    Holding::Whole => representation_bytes(weight.source, &weight.shape)?,
-                    Holding::Streamed(streamed) => representation_bytes(weight.source, &[streamed.table_rows, weight.table_width()])?,
-                    Holding::Banked { .. } => representation_bytes(weight.source, &weight.descriptor.shape)?,
-                };
-                stored = stored.checked_add(bytes).ok_or_else(overflow)?;
+        let descriptors = weights.into_iter().flatten().map(|weight| (weight.component, &weight.descriptor))
+            .chain(self.host_tables.iter().map(|table| (table.component, &table.descriptor)));
+        for (component, descriptor) in descriptors {
+            let names = std::iter::once(descriptor.name.as_str())
+                .chain(crate::import_transforms::grid(descriptor).map(|(name, _)| name))
+                .chain(crate::import_transforms::appended(descriptor).iter().flat_map(|part| {
+                    std::iter::once(part.tensor.as_str()).chain(part.grid.as_deref())
+                }))
+                .chain(crate::import_transforms::scale_tensor(descriptor));
+            for name in names {
+                if counted.insert((component, name)) {
+                    let bytes = self.stored_tensors.get(&component).and_then(|tensors| tensors.get(name))
+                        .ok_or_else(|| format!("stored tensor {name:?} is absent from its planned component"))?;
+                    stored = stored.checked_add(*bytes).ok_or_else(overflow)?;
+                }
             }
         }
         let host = self.bank.as_ref().map_or(Ok(0), super::ExpertBankPlan::host_only_bytes)?;
-        for table in &self.host_tables {
-            if counted.insert((table.component, table.descriptor.name.as_str())) {
-                let rows = table.shape[0];
-                stored = representation_bytes(table.source, &[rows, table.columns()])?.checked_add(stored).ok_or_else(overflow)?;
-            }
-        }
         let streamed = self.bank.as_ref().map_or(Ok(0), super::ExpertBankPlan::unheld_bytes)?;
         let tables = self.unheld_table_bytes()?;
         let held = [host, streamed, tables]
@@ -2618,10 +2641,12 @@ impl ModelLoadPlan {
 
     #[cfg(test)]
     pub(crate) fn from_vision(vision: Vec<WeightPlan>) -> Self {
+        let stored_tensors = synthetic_stored_tensors(&vision);
         let mut load = Self {
             target: Vec::new(),
             head: None,
             vision: Some(vision),
+            stored_tensors,
             host_tables: Vec::new(),
             readout_candidates: Vec::new(),
             readout_choices: Vec::new(),
@@ -3055,10 +3080,18 @@ impl ModelLoadPlan {
             }
         }
 
+        let mut stored_tensors = fx_map();
+        for (component, tensors) in std::iter::once((target_component, target_tensors))
+            .chain(draft.map(|(identity, tensors)| (ArtifactComponent { kind: ArtifactComponentKind::Draft, identity }, tensors)))
+            .chain(projector.map(|(identity, tensors)| (ArtifactComponent { kind: ArtifactComponentKind::Projector, identity }, tensors)))
+        {
+            stored_tensors.insert(component, tensors.iter().map(|tensor| (tensor.name.clone(), tensor.nbytes)).collect());
+        }
         let load = Self {
             target,
             head,
             vision,
+            stored_tensors: std::sync::Arc::new(stored_tensors),
             host_tables,
             readout_candidates: Vec::new(),
             readout_choices: Vec::new(),

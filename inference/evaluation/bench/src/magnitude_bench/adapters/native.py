@@ -140,6 +140,8 @@ class Native(Adapter):
                 if magnitude.prefill_tokens is not None
                 else []
             ),
+            *(["--kv-codec", magnitude.kv_codec] if magnitude.kv_codec is not None else []),
+            *(["--weight-cap", str(magnitude.weight_cap)] if magnitude.weight_cap is not None else []),
             *self.generation(),
             *self.tuning(),
         ]
