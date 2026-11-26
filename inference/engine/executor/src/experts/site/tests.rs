@@ -574,7 +574,8 @@ fn host_reads_of_a_site_slot_canonicalize_nans() {
 
 /// Tiled q8 (`Weights::tile_q8`) and whole-group inline quantization
 /// (`no_k_split`) produce bit-for-bit identical outputs to single-row (`M = 1`)
-/// execution across `Q2_0`, `Q2_K`, `IQ2_XXS`, `IQ1_M`, and `Q4_0` at
+/// execution across `Q2_0`, `Q2_K`, `IQ2_XXS`, `IQ1_M`, `IQ1_S`, and `Q4_0`,
+/// including Inkling's mixed `IQ1_S` gate/up and `Q2_0` down, at
 /// `M = 1, 2, 4, 8, 12` for both `no_k_split` and K-split worker counts.
 #[test]
 fn tiled_formats_multi_row_matches_single_row_bit_for_bit() {
@@ -584,11 +585,13 @@ fn tiled_formats_multi_row_matches_single_row_bit_for_bit() {
     let (h, f, max_rows) = (512usize, 256usize, 12usize);
     let x = (0..max_rows * h).map(|index| ((index * 53 % 211) as f32 / 211.0 - 0.5) * 2.0).collect::<Vec<_>>();
     let formats = [
-        ("q2g64@mma16", "gguf_q2_0"),
-        ("q2k@mma16", "gguf_q2_k"),
-        ("iq2xxs@mma16", "gguf_iq2_xxs"),
-        ("iq1m@mma16", "gguf_iq1_m"),
-        ("q4g32s@mma16", "gguf_q4_0"),
+        ("q2g64@mma16", "gguf_q2_0", "q2g64@mma16", "gguf_q2_0"),
+        ("q2k@mma16", "gguf_q2_k", "q2k@mma16", "gguf_q2_k"),
+        ("iq2xxs@mma16", "gguf_iq2_xxs", "iq2xxs@mma16", "gguf_iq2_xxs"),
+        ("iq1m@mma16", "gguf_iq1_m", "iq1m@mma16", "gguf_iq1_m"),
+        // Inkling's GGUF uses IQ1_S for its fused gate/up banks and Q2_0 down.
+        ("iq1s@rows16", "gguf_iq1_s", "q2g64@mma16", "gguf_q2_0"),
+        ("q4g32s@mma16", "gguf_q4_0", "q4g32s@mma16", "gguf_q4_0"),
     ];
     let build = |name: &str, source: &str, rows: usize, columns: usize, seed: u32| {
         let resident = seismic::Element::named(name).unwrap_or_else(|| panic!("{name}"));
@@ -609,12 +612,12 @@ fn tiled_formats_multi_row_matches_single_row_bit_for_bit() {
         }
         SiteRecords::new(records, rows, columns, resident).unwrap()
     };
-    for (name, source) in formats {
+    for (name, source, down_name, down_source) in formats {
         // Reference single-row outputs (`M = 1`, `workers = 1`) for each row `0..max_rows`.
         let ref_tensors = SiteTensors {
             gate: Some(build(name, source, f, h, 11)),
             up: build(name, source, f, h, 22),
-            down: build(name, source, h, f, 33),
+            down: build(down_name, down_source, h, f, 33),
         };
         let ref_layer = SiteLayer::owned(&charges, ref_tensors, SiteScales { gate: None, up: None }, packed_shape(max_rows, 2, 2, h, f)).unwrap();
         let ref_compute = HostCompute::start(vec![ref_layer], &threads(1)).unwrap();
@@ -640,7 +643,7 @@ fn tiled_formats_multi_row_matches_single_row_bit_for_bit() {
             let tensors = SiteTensors {
                 gate: Some(build(name, source, f, h, 11)),
                 up: build(name, source, f, h, 22),
-                down: build(name, source, h, f, 33),
+                down: build(down_name, down_source, h, f, 33),
             };
             let layer = SiteLayer::owned(&charges, tensors, SiteScales { gate: None, up: None }, packed_shape(max_rows, 2, 2, h, f)).unwrap();
             let compute = HostCompute::start(vec![layer], &threads(workers)).unwrap();

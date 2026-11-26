@@ -1094,6 +1094,22 @@ def test_bench_serves_a_held_set_in_place_of_a_catalog_model(tmp_path):
             REGISTRY["bench"].plan(parse(*common, *refused), None, "alpha")
 
 
+def test_bench_attaches_a_separate_mtp_to_the_held_checkpoint():
+    common = ("bench", "--backend", "cuda", "--purpose", "p", "--estimate", "5m", "--template", "repeat:4k")
+    plan = REGISTRY["bench"].plan(parse(*common, "--checkpoint", "/models/set", "--checkpoint-mtp", "/models/mtp.gguf",
+                                       "--magnitude-method", "mtp", "--magnitude-kv-codec", "dense",
+                                       "--magnitude-weight-cap", "123456"), None, "alpha")
+    checkpoint = dict(plan.jobs)["checkpoint"].argv
+    assert checkpoint[-6:] == ("--path", "/models/set", "--mtp", "/models/mtp.gguf", "--output", "{artifacts}")
+    bench = dict(plan.jobs)["bench"].argv
+    assert bench[bench.index("--artifacts") + 1] == "{artifacts}"
+    assert bench[bench.index("--magnitude-method") + 1] == "mtp"
+    assert bench[bench.index("--magnitude-kv-codec") + 1] == "dense"
+    assert bench[bench.index("--magnitude-weight-cap") + 1] == "123456"
+    with pytest.raises(SystemExit, match="--checkpoint-mtp requires --checkpoint"):
+        REGISTRY["bench"].plan(parse(*common, "--model", MODEL, "--checkpoint-mtp", "/models/mtp.gguf"), None, "alpha")
+
+
 def test_bench_answer_surfaces_tuning_health_alert_when_truncated_or_absent_from_report(tmp_path):
     from magnitude_rig.instruments import bench
 

@@ -23,7 +23,7 @@ import os
 import re
 import sys
 
-from .identity import Refused, recorded_sha256, remembered_sha256
+from .identity import Refused, recorded_sha256, remembered_sha256, sha256
 
 # A shard, or a lone file: its set's name, and its place in the set.
 SHARD = re.compile(r"^(?P<stem>.+?)(?:-(?P<index>\d{5})-of-(?P<count>\d{5}))?\.gguf$")
@@ -68,13 +68,24 @@ def model_of(directory: str) -> tuple[str, str, list[str]]:
     return f"{stem.lower()}:checkpoint-{digest[:16]}", digest, paths
 
 
-def acquire(directory: str, output: str) -> dict:
+def acquire(directory: str, output: str, mtp: str | None = None) -> dict:
     """The set's acquisition object, written to `output`: its target the first shard, which opens the rest, and
     `target_sha256` that file's SHA-256, as a catalog acquisition's is, so the target's own provenance record
-    (`identity.recorded_sha256`) tells whether it is a slice; the set's identity is in its model name."""
+    (`identity.recorded_sha256`) tells whether it is a slice; the set's identity is in its model name. Where
+    `mtp` is given, the separate draft head is identified by its own bytes and is not copied."""
     model, digest, paths = model_of(directory)
+    drafter = None
+    if mtp is not None:
+        if not os.path.isfile(mtp):
+            raise Refused(f"{mtp}: MTP companion is not a file")
+        mtp = os.path.abspath(mtp)
+        mtp_sha256 = sha256(mtp)
+        recorded = recorded_sha256(mtp)
+        if recorded not in (None, mtp_sha256):
+            raise Refused(f"{mtp}: its bytes hash to sha256 {mtp_sha256}, but its provenance record names {recorded}")
+        drafter = {"method": "mtp", "path": mtp, "sha256": mtp_sha256}
     artifacts = {"model": model, "target": paths[0], "target_files": paths,
-                 "target_sha256": remembered_sha256(paths[0]), "drafter": None, "projector": None}
+                 "target_sha256": remembered_sha256(paths[0]), "drafter": drafter, "projector": None}
     with open(output, "w") as file:
         json.dump(artifacts, file)
     print("checkpoint %s: %d shards, sha256 %s" % (directory, len(paths), digest), flush=True)
@@ -84,13 +95,14 @@ def acquire(directory: str, output: str) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="magnitude_rig.host.checkpoint", description=__doc__.splitlines()[0])
     parser.add_argument("--path", required=True)
+    parser.add_argument("--mtp", help="a separate MTP GGUF companion for this target")
     parser.add_argument("--output", help="write the acquisition object here; without it, print the set's model name")
     arguments = parser.parse_args(argv)
     try:
         if arguments.output is None:
             print(model_of(arguments.path)[0])
         else:
-            acquire(arguments.path, arguments.output)
+            acquire(arguments.path, arguments.output, arguments.mtp)
     except Refused as failure:
         print("checkpoint: %s" % failure, file=sys.stderr)
         return 1

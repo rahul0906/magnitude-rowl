@@ -54,6 +54,54 @@ fn a_fixture_of_more_experts_admits_a_partial_bank() {
     }
 }
 
+#[test]
+fn placement_counts_a_fused_expert_tensor_once_at_its_stored_size() {
+    use crate::planning::fixtures::{qwen4exp_fixture_definition_of, streamed_experts_manifest, LIMITS};
+    use magnitude_family_contracts::FeedForwardUp;
+
+    let mut definition = qwen4exp_fixture_definition_of(1, 128);
+    let mut manifest = streamed_experts_manifest(&definition);
+    let Operator::RoutedFfn(routed) = &mut definition.decoder.blocks[0].sublayers[1].op else {
+        panic!("the fixture has a routed layer");
+    };
+    let FeedForwardUp::Gated { gate, up, .. } = &mut routed.expert_up else {
+        panic!("the fixture has gated experts");
+    };
+    let up_name = up.name.clone();
+    let rows = gate.shape[1];
+    let fused = WeightDescriptor::stored(&gate.name, [gate.shape[0], 2 * rows, gate.shape[2]]);
+    *gate = fused.slice_rows(0, rows).unwrap();
+    *up = fused.slice_rows(rows, rows).unwrap();
+    let stored = manifest.target.tensors.iter_mut().find(|tensor| tensor.name == gate.name).unwrap();
+    stored.shape[1] *= 2;
+    stored.nbytes *= 2;
+    manifest.target.tensors.retain(|tensor| tensor.name != up_name);
+    let mut offset = 0;
+    for tensor in &mut manifest.target.tensors {
+        tensor.offset = offset;
+        offset += tensor.nbytes;
+    }
+    manifest.target.files[0].size = offset;
+
+    let resident = ModelLoadPlan::derive(
+        &manifest, &definition, crate::ComponentSelection { head: false, vision: false },
+        crate::resident_layout(crate::ExecutionPath::Native, seismic::BackendName::Metal),
+        crate::PlannedMethod::Plain, LIMITS,
+    ).unwrap();
+    let substrate = BankSubstrate {
+        backend: seismic::BackendName::Metal,
+        allocations: seismic::NativeAllocations::EXACT,
+        host: HostTier::Unified(Parking::InKernels),
+        has_side_queue: false,
+    };
+    let banked = resident.clone().with_expert_bank_at_floor(&definition, substrate).unwrap();
+    for load in [&resident, &banked] {
+        let placement = load.weight_placement().unwrap();
+        assert_eq!(placement.held + placement.host + placement.streamed + placement.tables, offset);
+    }
+    assert!(banked.weight_placement().unwrap().streamed > 0);
+}
+
 /// A shrink crosses a charge's plateaus to the shallowest holding that
 /// releases what is owed, never past the floor, and none where the
 /// floor releases nothing.

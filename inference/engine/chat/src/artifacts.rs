@@ -184,7 +184,8 @@ impl Profile {
                 false,
             ),
             // GPT-4o pieces: case-split letter runs with trailing contractions.
-            ("gpt2", Some("llama4")) => byte_level(
+            // Inkling 2's reference loader selects this profile with no BOS.
+            ("gpt2", Some("llama4" | "inkling2")) => byte_level(
                 &[(
                     r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+",
                     Isolated,
@@ -638,6 +639,16 @@ mod normalization_tests {
                 other => panic!("{pre} {nfc}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn inkling2_uses_the_gpt4o_bpe_pieces_without_implicit_bos() {
+        let config = gguf_byte_bpe(&payload("inkling2", None), "inkling-test".into()).unwrap();
+        let llama4 = gguf_byte_bpe(&payload("llama4", None), "llama4-test".into()).unwrap();
+        assert_eq!(config.normalization, Normalization::None);
+        assert_eq!(config.splits, llama4.splits);
+        assert!(config.ignore_merges);
+        assert_eq!(config.implicit_bos, None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 """A whole GGUF set the host already holds, as the subject of a run in place of a catalog model: the one owner of
 `--checkpoint DIR` for every instrument that serves, drafts or judges one (`kl`, `draft`, `bench`). The set is read
 where it lies (`host/checkpoint.py` writes the run's acquisition object, naming the set by its bytes): nothing is
-fetched, converted or copied, so a run has no catalog acquisition (`acquires` is None) and its first job writes
-`{artifacts}`."""
+fetched, converted or copied. A separate MTP companion can be attached by path and is identified by its bytes.
+Thus a run has no catalog acquisition (`acquires` is None) and its first job writes `{artifacts}`."""
 
 import argparse
 
@@ -17,17 +17,24 @@ def option(parser: argparse.ArgumentParser, detail: str = "") -> None:
     parser.add_argument("--checkpoint", metavar="DIR",
                         help="a whole GGUF set the host already holds in this directory, read where it lies: "
                         f"nothing is fetched, converted or copied{detail}")
+    parser.add_argument("--checkpoint-mtp", metavar="GGUF",
+                        help="the separate MTP GGUF companion for a held checkpoint, read where it lies")
 
 
 def subject(command: str, arguments) -> None:
     """Refuse a run that names both a catalog model and a held set, or neither."""
     if (arguments.model is None) == (arguments.checkpoint is None):
         raise SystemExit(f"{command}: give --model or --checkpoint, one")
+    if arguments.checkpoint_mtp is not None and arguments.checkpoint is None:
+        raise SystemExit(f"{command}: --checkpoint-mtp requires --checkpoint")
 
 
 def prepare(arguments) -> Step:
-    return Step(CHECKPOINT, ("{python}", "-m", "magnitude_rig.host.checkpoint", "--path", arguments.checkpoint,
-                             "--output", "{artifacts}"))  # fmt: skip
+    mtp = ("--mtp", arguments.checkpoint_mtp) if arguments.checkpoint_mtp is not None else ()
+    return Step(CHECKPOINT, (
+        "{python}", "-m", "magnitude_rig.host.checkpoint", "--path", arguments.checkpoint,
+        *mtp, "--output", "{artifacts}",
+    ))  # fmt: skip
 
 
 def jobs(arguments) -> tuple[tuple[str, Step], ...]:

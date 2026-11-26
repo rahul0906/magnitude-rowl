@@ -1,0 +1,72 @@
+# SSD-MoE implementation progress
+
+Updated 26 November 2026. The source plan in `SSD-MoE-Inference-Plan.md` is unchanged.
+
+## Preserved starting state
+
+- The checkout was already dirty before this work: staged Inkling metadata/inventory/tokenizer groundwork and an unstaged edit to `Inkling-2-Mini-Implementation-Plan.md`. Those changes remain untouched.
+- Gemma 4 is the installed HauhauCS Q4_K_M checkpoint recorded in the plan. Its separate MTP companion and vision projector remain in the original snapshot directory.
+- The MTP companion resolves to its full local blob (251,937,728 bytes); the 87-byte snapshot entry is a normal symlink, not an incomplete download.
+- Inkling initially was the supplied AtomicChat IQ1_S file at the pinned snapshot in the plan. The quality-model download is tracked separately below.
+
+## Rig setup
+
+- Installed the `magnitude-rig` workspace package and its fixture/benchmark dependencies using the `rig` workspace project. A full evaluation-workspace sync was attempted first but could not fetch its uncached PyTorch wheel with network access disabled; the rig-only environment is sufficient for these gates.
+- Ran `mrig setup local`; the local Metal host is ready. `mrig inspect --host local` reports `cpu/metal` and about 27 GB free beyond the rig's build/runtime floor.
+- Initial free space was about 30 GiB. The separate 4-bit Inkling path remains gated: the plan requires roughly 50–60 GiB free before its download and preparation.
+- mrig results are recorded under `inference/evaluation/results/`; the starting run inventory was empty.
+
+## Initial runs
+
+- The first Gemma run, `20261126T084310Z-bench-16f79a`, was stopped during the build phase before loading the model. It selected `worktree`, contrary to the plan's clean-baseline requirement.
+- Clean-source Gemma run `20261126T090159Z-bench-85056b` pins `e8d793836`, exposes only the main GGUF, and disables MTP. Its build succeeded in 5m15s and occupies 5.4 GB in the rig cache. The thermal gate passed after 808.8s; the run hashed the target as `3c13133469e431312fffb8b1d9c85ae42199e6bb5746ea1da84e8ddf2097d73c`. It failed before model load because `repeat:1k` (1,024 tokens) cannot fit the fixture's kept head and probe. The corrected `repeat:2k` run `20261126T092411Z-bench-b5c1f2` rendered its prompt, but clean-source loading failed in assessment with `resource planning failed: assessment memory bound failed: a plan's tiers hold more than its weights` (`assessment/assess.rs:113`). It recorded zero serving measurements. Free space was about 16 GiB at that run; the target hash read can warm OS file pages, so cache state remains uncontrolled.
+- The first Inkling run, `20261126T085027Z-script-a8a9b4`, prepared and verified the experts and loaded the model, but its 32-token request ended inside default reasoning with no visible assistant content. The worker shut down cleanly.
+- The second request (`20261126T085653Z-script-33ad3f`) contained reasoning even though `chat_template_kwargs` requested no reasoning; that response alone does not establish how the template interpreted the setting. The retry (`20261126T090012Z-script-5cf553`) returned `4` with `finish_reason=stop`. The MoeShift router does not expose `/apply-template`, so the current qualification does not claim to have verified the rendered effort setting.
+
+## Gemma MTP checkpoint pairing
+
+- Added `--checkpoint-mtp` to held-checkpoint rig instruments. It attaches a separate MTP GGUF by path, records the companion's SHA-256 in the acquisition, and never copies its bytes. This enables the exact Gemma target/MTP pair to run through the existing Magnitude bench adapter.
+- A temporary-file acquisition smoke and focused tests validated the companion's method, path and digest through the benchmark's `Acquisition` model; they also confirmed no sidecar is written beside the companion. The benchmark additionally exposes explicit KV codec and held-weight-cap options, so later comparisons can select dense state and the same weight budget. The cap does not represent total process memory.
+
+## Installed Magnitude Gemma smoke
+
+- The installed 0.3.3 service recognized the exact main GGUF and its adjacent MTP companion. Its assessment reported a 262,144-token fit with 13,101,673,600 required bytes; a streamed bank planned 45/128 expert slots (9 floor slots) with cold experts on disk. These are the installed app's assessment figures, not runtime measurements.
+- With MTP temporarily set to `none`, the local chat UI visibly returned `4` to `What is 2+2? Reply with one digit.` Thinking was off. The UI displayed 52 prompt tokens at 19 tok/s, 2 output tokens at 4 tok/s, and 35.4 s TTFT; this was a one-off first-load compatibility smoke, not a timing result.
+- The service installed an already-downloaded 0.3.5 update during the smoke. The exact serving version for that response is uncertain; the installed CLI and app now report 0.3.5. The script restored the model's drafter choice to `Auto`, and `magnitude status` confirmed the service stopped. The mrig record exited 1 during process-group cleanup after the answer; shutdown handling was hardened in the script afterward and has not been rerun.
+
+## Inkling smoke path
+
+- Added `inference/evaluation/scripts/qualify_moeshift_inkling_iq1s.sh`. It prepares and verifies a per-revision expert store for the pinned IQ1_S or AD-Q4_K file, writes a temporary FP16-KV MoeShift profile under the mrig run directory, submits one short OpenAI-compatible request, and terminates the server process group. The original passing smoke used IQ1_S at 4K context.
+- The script refuses to start a new extraction unless at least 21.6 GB is free, preserving the plan's lower 15 GiB headroom after an approximately 5.5 GB expert store. It refuses to overwrite an incomplete store.
+- Extraction and exact byte verification succeeded: 48 routed tensors over 24 layers, 5,478,285,312 expert bytes. The persistent store is about 5.1 GiB under `~/.cache/magnitude/moeshift/inkling-2-mini-iq1s-309509848b3151419aa26d069eb03db57fd29a00`. The successful 4K-context smoke used FP16 KV and returned a normal short answer; it establishes compatibility only. Extraction warmed the model's file pages, so its timing and I/O counters are not used as performance evidence. Free space afterward is about 21 GiB (17 GB beyond the rig floor); the plan's 15 GiB reserve is still present.
+
+## Storage gate review
+
+- After the source builds, Inkling expert extraction, and installed-app update, internal free space was about 15 GiB. No external storage volume is mounted.
+- The Hugging Face cache uses about 32.5 GiB, and `~/.magnitude/models` about 17.2 GiB; these contain installed model files and were left intact.
+- The read-only scan found a 32.7 GiB (35.1 GB) Cargo `target` in the clean `/Users/rahul/work/pdfcraft-rowl` repository, with debug/release/wasm outputs and no model-format files. `cargo clean` removed that generated output only: 49,746 files and 25.9 GiB reclaimed. `uv cache prune` separately removed 45,074 unreachable cache files (1.4 GiB). No source or model files were removed.
+- Later, idle mrig checkout build outputs were cleaned in accordance with `inference/AGENTS.md`; these are reproducible Cargo outputs, not model files. Recheck free space before the quality download and expert extraction, since active builds consume part of the recovered space. The installed model stores, existing MoeShift expert store, and mrig run evidence remain intact.
+- Isolated diagnostic run `20261126T103307Z-bench-df87ab` used the same `e8d793836` source with only diagnostic error detail added. Its build succeeded, but the thermal gate failed after 900.8s: CPU sensor spread was 5.16°C and GPU activity was 10.1%, above the 1.5°C and 5% limits. The model assessment did not run, so this produced no accounting totals or serving measurements. Its failed gate evidence and the diagnostic-only source patch are preserved in `inference/evaluation/results/20261126T103307Z-bench-df87ab/`. Do not repeat while the host remains active; a later retry requires a quiet host that can pass the gate.
+
+## Source Gemma fixes and checks
+
+- Diagnostic run `20261126T124643Z-script-07a779` showed that planned tiers included 14,066,325,504 streamed bytes while the deduplicated weights were counted as 12,498,070,648 bytes. Fused gate/up tensors were counted once using the size of a sliced logical view rather than their full stored size. Weight planning now counts the actual artifact tensor size once, including its scale tensors and appended parts.
+- A source smoke then exposed a second issue: tuning an expert prefix rejected fused tensors before applying their per-expert row slice. The stored prefix now retains its physical shape and checks the resulting transformed shape. Regression tests cover both the stored-size accounting and the selected prefix bytes.
+- `mrig test` run `20261126T132004Z-test-f92def` passed both focused executor tests on the CPU backend. `mrig check` run `20261126T131831Z-check-433252` passed Metal executor Clippy. The source-built plain Gemma smoke `20261126T132735Z-script-cc5da4` loaded an SSD-backed expert bank and returned `4` with a normal stop. That initial smoke used the engine's default affine K8/V4 state, so it is a compatibility result, not the planned dense-state quality baseline or a timing result.
+- A separate-companion MTP smoke `20261126T133423Z-script-f76c56` confirmed that MTP was selected, but Metal tuning of affine K8/V4 attention failed for the speculative shape and the engine fell back to canonical kernel defaults. The smoke rejected that fallback before submitting a request. This remains an unresolved quantized-KV MTP issue; no MTP success or speedup is claimed for that configuration.
+- Follow-up pair `20261126T134015Z-script-b9eb65` explicitly selected dense state, loaded streamed experts, and returned `4` with a normal stop for both plain and separate-companion MTP. Health reported plain for the control and MTP with 15 proposals and an adaptive policy for the companion. Gemma uses BF16 activations, so its dense state is BF16 rather than FP16. These short requests establish compatibility, not speculative acceptance, parity, or performance.
+
+## Quality Inkling candidate
+
+- On 27 November the user supplied `unsloth/Inkling-2-Mini-GGUF@8078d149286eec7193795413b9e0643da6d11fa1`, `Inkling-2-Mini-UD-Q4_K_XL.gguf` (17,629,760,736 bytes; SHA-256 `e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3`, verified). Its header identifies `inkling2_loop`, 128 experts with 8 selected, and 48 routed tensors totaling 15,797,846,016 bytes (40 NVFP4 and 8 Q8_0). Run `20261126T191251Z-script-f1f64b` created and byte-verified a separate expert store, then stopped at an unsupported router endpoint before generation. Corrected run `20261126T191508Z-script-5955df` loaded the model with FP16 KV at 32K capacity and returned `4` with a normal stop, recording expert hits and misses across 48 logical visits. This used 25 prompt tokens; capacity is not occupied-context qualification. System swap was 814.81 MiB and 837.62 MiB in the two sparse samples, which cannot establish a peak or persistent growth.
+- Longer retrieval run `20261126T192041Z-script-ef2763` returned both expected values, stopped normally, and processed 2,478 prompt tokens. Five sampled swap readings remained at 1,052.25 MiB. An earlier version of that fixture hit its output limit after 192 generated tokens (`20261126T191759Z-script-b620e3`); its system swap samples rose from 837.62 to 1,038.00 MiB. Neither is a controlled timing or whole-workload quality measurement.
+- Occupied-context run `20261126T192304Z-script-b1d63f` processed 30,678 post-template prompt tokens at 32,768 capacity, returned both expected values, stopped normally, and reported `truncated = 0`. It used FP16 K/V and the verified SSD-backed experts; the logs identify 48 logical visits over 24 shared decode windows. Across 29 sparse system swap samples, usage was 1,052.25 MiB at the start, peaked at 1,052.25 MiB, and was 1,044.25 MiB in the final sample. The largest sampled process-tree footprint was approximately 8.82 GiB; sampling does not establish the actual peak. The prompt was synthetic, the model/expert files had been read during verification, and the script did not use a timing gate, so its timing is not a cold-cache benchmark. Token count and truncation are reported by the serving backend rather than an independent tokenizer.
+- Pinned `AtomicChat/Inkling-2-Mini-GGUF@309509848b3151419aa26d069eb03db57fd29a00`, `Inkling-2-Mini-AD-Q4_K.gguf`: published size 16,525,559,776 bytes and SHA-256 `2bfc233e10925297cc79dffce5d9be4f2a2b43e499ea6a1bf03b9242867dce9e`. A bounded header read found 48 routed tensors totaling 14,778,630,144 bytes, in Q5_0 and Q4_K formats. It does not verify the complete file. The inventory and reproducer are in `inference/evaluation/results/ssd-moe-inventory/`.
+- The extraction script verifies the full model digest and existing expert store, refuses incomplete stores, preserves at least 15 GiB after a new extraction, and samples process footprint and system swap. Sparse samples do not establish a true peak.
+- Cleaning the idle rig build brought free space to 51.88 GiB, enough for the model, extracted experts, and the 15 GiB reserve with about 7.7 GiB spare at that moment. The first AtomicChat download attempt failed with a connection reset; the Hugging Face downloader removed its own incomplete temporary file. An attempted switch to the concurrent transfer backend was blocked because automatic approval review hit its usage limit. The AtomicChat four-bit model was not downloaded or qualified; the later user-supplied Unsloth file is a distinct candidate.
+
+## Remaining gates
+
+1. Run controlled Gemma benchmarks only after correctness and thermal conditions permit; report MTP separately from the non-speculative control. Investigate the separate affine K8/V4 MTP tuning fallback before qualifying that configuration.
+2. Compare streamed results against suitable resident/operator references. Qualify actual workload quality and follow-ups; a synthetic long-context retrieval alone does not establish them.
+3. Measure a representative baseline, fresh and follow-up prompts, and the bottleneck before choosing cache, prefill, overlap, or architecture changes. A compatibility smoke is not a performance or workload-quality result.
